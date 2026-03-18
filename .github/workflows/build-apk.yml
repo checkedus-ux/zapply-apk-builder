@@ -207,6 +207,7 @@ jobs:
       # ─── 15. Callback — success ───
       - name: Notify Zapply — build succeeded
         if: success()
+        continue-on-error: true
         run: |
           echo "Sending success callback..."
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
@@ -223,6 +224,7 @@ jobs:
       # ─── 16. Callback — failure ───
       - name: Notify Zapply — build failed
         if: failure()
+        continue-on-error: true
         run: |
           echo "Sending failure callback..."
           FAILED_STEP="${{ github.action }}"
