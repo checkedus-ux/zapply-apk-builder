@@ -43,7 +43,15 @@ jobs:
         with:
           node-version: "20"
 
-      # ─── 4. Cache Gradle ───
+      # ─── 4. Setup Android SDK ───
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ─── 5. Accept Android licenses ───
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      # ─── 6. Cache Gradle ───
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
         with:
@@ -54,11 +62,11 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      # ─── 5. Install Cordova ───
+      # ─── 7. Install Cordova ───
       - name: Install Cordova CLI
         run: npm install -g cordova
 
-      # ─── 6. Create Cordova project ───
+      # ─── 8. Create Cordova project ───
       - name: Create Cordova project
         run: |
           SAFE_ID=$(echo "${{ inputs.app_id }}" | tr -cd 'a-zA-Z0-9' | head -c 30)
@@ -67,12 +75,12 @@ jobs:
           echo "PACKAGE_ID=${PACKAGE}" >> $GITHUB_ENV
           echo "Created project: ${PACKAGE}"
 
-      # ─── 7. Add Android platform ───
+      # ─── 9. Add Android platform (pinned version) ───
       - name: Add Android platform
         working-directory: app-build
-        run: cordova platform add android
+        run: cordova platform add android@13.0.0
 
-      # ─── 8. Download HTML ───
+      # ─── 10. Download HTML ───
       - name: Download generated HTML
         working-directory: app-build
         run: |
@@ -92,45 +100,47 @@ jobs:
 
           echo "Downloaded ${FILE_SIZE} bytes (HTTP ${HTTP_CODE})"
 
-      # ─── 9. Update config.xml ───
+      # ─── 11. Update config.xml ───
       - name: Configure app metadata
         working-directory: app-build
         run: |
-          # Copy template config
           cp ../cordova-template/config.xml config.xml
 
-          # Override package ID
           sed -i "s|id=\"com.zapply.generatedapp\"|id=\"${PACKAGE_ID}\"|g" config.xml
 
-          # Override app name
           APP_NAME_ESCAPED=$(echo "${{ inputs.app_name }}" | sed 's/[&/\]/\\&/g')
           sed -i "s|<name>ZapplyApp</name>|<name>${APP_NAME_ESCAPED}</name>|g" config.xml
 
           echo "Config updated:"
           head -5 config.xml
 
-      # ─── 10. Build debug APK ───
+      # ─── 12. Build debug APK ───
       - name: Build Android debug APK
         working-directory: app-build
         run: |
           echo "Starting Cordova build..."
-          cordova build android --debug --no-telemetry 2>&1 | tail -20
-          echo "Build completed"
+          cordova build android --debug --no-telemetry
+          echo "Build completed successfully"
 
-      # ─── 11. Find APK path ───
+      # ─── 13. Find APK path ───
       - name: Locate APK file
         id: find_apk
         working-directory: app-build
         run: |
+          echo "Searching for APK files..."
+          find platforms/android -name "*.apk" -type f 2>/dev/null || true
+
           APK_PATH=$(find platforms/android -name "*.apk" -type f -path "*/debug/*" | head -1)
 
           if [ -z "$APK_PATH" ]; then
-            # Fallback: any APK
             APK_PATH=$(find platforms/android -name "*.apk" -type f | head -1)
           fi
 
           if [ -z "$APK_PATH" ]; then
             echo "::error::No APK file found after build"
+            echo "Listing build output directory:"
+            find platforms/android/app/build -type f -name "*.apk" -o -name "*.aab" 2>/dev/null || true
+            ls -la platforms/android/app/build/outputs/ 2>/dev/null || true
             exit 1
           fi
 
@@ -138,7 +148,7 @@ jobs:
           echo "apk_path=${APK_PATH}" >> $GITHUB_OUTPUT
           echo "Found APK: ${APK_PATH} (${APK_SIZE})"
 
-      # ─── 12 & 13. Upload APK to Supabase Storage ───
+      # ─── 14. Upload APK to Supabase Storage ───
       - name: Upload APK to Supabase Storage
         id: upload
         working-directory: app-build
@@ -148,7 +158,6 @@ jobs:
 
           echo "Uploading to: ${STORAGE_PATH}"
 
-          # Try POST (create)
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             -X POST "${UPLOAD_URL}" \
             -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
@@ -162,7 +171,6 @@ jobs:
           echo "Upload response (HTTP ${HTTP_CODE}): ${BODY}"
 
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            # Retry with PUT (update)
             echo "POST failed, trying PUT upsert..."
             RESPONSE=$(curl -s -w "\n%{http_code}" \
               -X PUT "${UPLOAD_URL}" \
@@ -179,12 +187,11 @@ jobs:
             fi
           fi
 
-          # Build public URL
           APK_URL="${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${STORAGE_PATH}"
           echo "apk_url=${APK_URL}" >> $GITHUB_OUTPUT
           echo "Upload successful: ${APK_URL}"
 
-      # ─── 14. Callback — success ───
+      # ─── 15. Callback — success ───
       - name: Notify Zapply — build succeeded
         if: success()
         run: |
@@ -200,7 +207,7 @@ jobs:
             }")
           echo "Callback response: HTTP ${HTTP_CODE}"
 
-      # ─── 15. Callback — failure ───
+      # ─── 16. Callback — failure ───
       - name: Notify Zapply — build failed
         if: failure()
         run: |
