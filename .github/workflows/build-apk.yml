@@ -7,8 +7,8 @@ on:
         description: "Unique app ID from Zapply database"
         required: true
         type: string
-      html_url:
-        description: "Supabase Storage URL of the generated HTML file"
+      tsx_url:
+        description: "Supabase Storage URL of the generated App.tsx file"
         required: true
         type: string
       app_name:
@@ -51,96 +51,104 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses || true
 
-      # ─── 6. Cache Gradle ───
-      - name: Cache Gradle dependencies
+      # ─── 6. Cache npm + Gradle ───
+      - name: Cache dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('cordova-template/config.xml') }}
+            ~/.npm
+          key: build-${{ runner.os }}-${{ hashFiles('template/package-lock.json') }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            build-${{ runner.os }}-
 
-      # ─── 7. Install Cordova ───
-      - name: Install Cordova CLI
-        run: npm install -g cordova
-
-      # ─── 8. Create Cordova project ───
-      - name: Create Cordova project
+      # ─── 7. Copy template to build directory ───
+      - name: Setup build directory
         run: |
-          SAFE_ID=$(echo "${{ inputs.app_id }}" | tr -cd 'a-zA-Z0-9' | head -c 30)
-          PACKAGE="com.zapply.app${SAFE_ID}"
-          cordova create app-build "${PACKAGE}" "${{ inputs.app_name }}"
-          echo "PACKAGE_ID=${PACKAGE}" >> $GITHUB_ENV
-          echo "Created project: ${PACKAGE}"
+          cp -r template/ app-build/
+          echo "Template copied to app-build/"
+          ls -la app-build/
 
-      # ─── 9. Add Android platform (pinned version) ───
-      - name: Add Android platform
-        working-directory: app-build
-        run: cordova platform add android@13.0.0
-
-      # ─── 10. Download HTML ───
-      - name: Download generated HTML
+      # ─── 8. Download AI-generated App.tsx ───
+      - name: Download generated App.tsx
         working-directory: app-build
         run: |
-          echo "Downloading: ${{ inputs.html_url }}"
-          HTTP_CODE=$(curl -sL -w "%{http_code}" -o www/index.html "${{ inputs.html_url }}")
+          echo "Downloading: ${{ inputs.tsx_url }}"
+          HTTP_CODE=$(curl -sL -w "%{http_code}" -o src/App.tsx "${{ inputs.tsx_url }}")
 
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "::error::Download failed with HTTP ${HTTP_CODE}"
             exit 1
           fi
 
-          FILE_SIZE=$(wc -c < www/index.html)
+          FILE_SIZE=$(wc -c < src/App.tsx)
           if [ "$FILE_SIZE" -lt 50 ]; then
             echo "::error::Downloaded file too small (${FILE_SIZE} bytes) — likely invalid"
             exit 1
           fi
 
-          echo "Downloaded ${FILE_SIZE} bytes (HTTP ${HTTP_CODE})"
+          echo "Downloaded App.tsx: ${FILE_SIZE} bytes (HTTP ${HTTP_CODE})"
+          echo "First 5 lines:"
+          head -5 src/App.tsx
 
-      # ─── 11. Update config.xml ───
+      # ─── 9. Configure app metadata ───
       - name: Configure app metadata
         working-directory: app-build
         run: |
-          cp ../cordova-template/config.xml config.xml
+          SAFE_ID=$(echo "${{ inputs.app_id }}" | tr -cd 'a-zA-Z0-9' | head -c 30)
+          PACKAGE_ID="com.zapply.app${SAFE_ID}"
 
-          sed -i "s|id=\"com.zapply.generatedapp\"|id=\"${PACKAGE_ID}\"|g" config.xml
+          # Update capacitor.config.ts
+          sed -i "s|appId: 'com.zapply.generated'|appId: '${PACKAGE_ID}'|g" capacitor.config.ts
+          sed -i "s|appName: 'ZapplyApp'|appName: '${{ inputs.app_name }}'|g" capacitor.config.ts
 
-          APP_NAME_ESCAPED=$(echo "${{ inputs.app_name }}" | sed 's/[&/\]/\\&/g')
-          sed -i "s|<name>ZapplyApp</name>|<name>${APP_NAME_ESCAPED}</name>|g" config.xml
+          echo "PACKAGE_ID=${PACKAGE_ID}" >> $GITHUB_ENV
+          echo "Configured: ${PACKAGE_ID} / ${{ inputs.app_name }}"
 
-          echo "Config updated:"
-          head -5 config.xml
+      # ─── 10. Install npm dependencies ───
+      - name: Install dependencies
+        working-directory: app-build
+        run: npm install
 
-      # ─── 12. Build debug APK ───
-      - name: Build Android debug APK
+      # ─── 11. Build with Vite ───
+      - name: Build React app
         working-directory: app-build
         run: |
-          echo "Starting Cordova build..."
-          cordova build android --debug --no-telemetry
-          echo "Build completed successfully"
+          echo "Building React app with Vite..."
+          npx vite build
+          echo "Build output:"
+          ls -la dist/
 
-      # ─── 13. Find APK path ───
+      # ─── 12. Sync with Capacitor ───
+      - name: Sync Capacitor Android
+        working-directory: app-build
+        run: |
+          npx cap sync android
+          echo "Capacitor sync complete"
+
+      # ─── 13. Build Android APK ───
+      - name: Build Android debug APK
+        working-directory: app-build/android
+        run: |
+          echo "Starting Gradle build..."
+          ./gradlew assembleDebug
+          echo "APK build completed"
+
+      # ─── 14. Locate APK file ───
       - name: Locate APK file
         id: find_apk
         working-directory: app-build
         run: |
-          echo "Searching for APK files..."
-          find platforms/android -name "*.apk" -type f 2>/dev/null || true
-
-          APK_PATH=$(find platforms/android -name "*.apk" -type f -path "*/debug/*" | head -1)
+          APK_PATH=$(find android -name "*.apk" -type f -path "*/debug/*" | head -1)
 
           if [ -z "$APK_PATH" ]; then
-            APK_PATH=$(find platforms/android -name "*.apk" -type f | head -1)
+            APK_PATH=$(find android -name "*.apk" -type f | head -1)
           fi
 
           if [ -z "$APK_PATH" ]; then
             echo "::error::No APK file found after build"
-            echo "Listing build output directory:"
-            find platforms/android/app/build -type f -name "*.apk" -o -name "*.aab" 2>/dev/null || true
-            ls -la platforms/android/app/build/outputs/ 2>/dev/null || true
+            find android/app/build -type f -name "*.apk" 2>/dev/null || true
             exit 1
           fi
 
@@ -148,7 +156,7 @@ jobs:
           echo "apk_path=${APK_PATH}" >> $GITHUB_OUTPUT
           echo "Found APK: ${APK_PATH} (${APK_SIZE})"
 
-      # ─── 14. Upload APK to Supabase Storage ───
+      # ─── 15. Upload APK to Supabase Storage ───
       - name: Upload APK to Supabase Storage
         id: upload
         working-directory: app-build
@@ -160,17 +168,13 @@ jobs:
           BUCKET="apk-files"
           OBJECT_PATH="${{ inputs.app_id }}/app.apk"
 
-          # Strip whitespace/newlines and trailing slash from URL
           SUPABASE_URL=$(echo "${SUPABASE_URL}" | tr -d '[:space:]')
           SUPABASE_SERVICE_KEY=$(echo "${SUPABASE_SERVICE_KEY}" | tr -d '[:space:]')
 
           UPLOAD_URL="${SUPABASE_URL}/storage/v1/object/${BUCKET}/${OBJECT_PATH}"
 
-          echo "APK file: ${APK_FILE}"
           echo "APK size: $(du -h "${APK_FILE}" | cut -f1)"
-          echo "Upload URL: ${UPLOAD_URL}"
 
-          # Upload with POST + x-upsert header + apikey header (required by newer Supabase)
           HTTP_CODE=$(curl -s -o /tmp/upload_response.json -w "%{http_code}" \
             -X POST "${UPLOAD_URL}" \
             -H "apikey: ${SUPABASE_SERVICE_KEY}" \
@@ -179,20 +183,16 @@ jobs:
             -H "x-upsert: true" \
             --data-binary "@${APK_FILE}")
 
-          echo "POST response (HTTP ${HTTP_CODE}):"
+          echo "Upload response (HTTP ${HTTP_CODE}):"
           cat /tmp/upload_response.json 2>/dev/null || true
 
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            echo "POST failed, trying PUT..."
             HTTP_CODE=$(curl -s -o /tmp/upload_response.json -w "%{http_code}" \
               -X PUT "${UPLOAD_URL}" \
               -H "apikey: ${SUPABASE_SERVICE_KEY}" \
               -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
               -H "Content-Type: application/vnd.android.package-archive" \
               --data-binary "@${APK_FILE}")
-
-            echo "PUT response (HTTP ${HTTP_CODE}):"
-            cat /tmp/upload_response.json 2>/dev/null || true
 
             if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
               echo "::error::Upload failed (HTTP ${HTTP_CODE})"
@@ -204,13 +204,12 @@ jobs:
           echo "apk_url=${APK_URL}" >> $GITHUB_OUTPUT
           echo "Upload successful: ${APK_URL}"
 
-      # ─── 15. Callback — success ───
+      # ─── 16. Callback — success ───
       - name: Notify Zapply — build succeeded
         if: success()
         continue-on-error: true
         run: |
-          echo "Sending success callback..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+          curl -s -o /dev/null -w "Callback: HTTP %{http_code}\n" \
             -X POST "${{ inputs.callback_url }}" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.CALLBACK_SECRET }}" \
@@ -218,16 +217,13 @@ jobs:
               \"app_id\": \"${{ inputs.app_id }}\",
               \"apk_url\": \"${{ steps.upload.outputs.apk_url }}\",
               \"status\": \"ready\"
-            }")
-          echo "Callback response: HTTP ${HTTP_CODE}"
+            }"
 
-      # ─── 16. Callback — failure ───
+      # ─── 17. Callback — failure ───
       - name: Notify Zapply — build failed
         if: failure()
         continue-on-error: true
         run: |
-          echo "Sending failure callback..."
-          FAILED_STEP="${{ github.action }}"
           curl -s -o /dev/null \
             -X POST "${{ inputs.callback_url }}" \
             -H "Content-Type: application/json" \
@@ -236,6 +232,5 @@ jobs:
               \"app_id\": \"${{ inputs.app_id }}\",
               \"apk_url\": null,
               \"status\": \"failed\",
-              \"error\": \"Build failed at step: ${FAILED_STEP}\"
+              \"error\": \"Build failed\"
             }"
-          echo "Failure callback sent"
