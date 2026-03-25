@@ -70,29 +70,70 @@ jobs:
           echo "Template copied to app-build/"
           ls -la app-build/
 
-      # ─── 8. Download AI-generated App.tsx ───
-      - name: Download generated App.tsx
+      # ─── 8. Download AI-generated code ───
+      - name: Download generated code
         working-directory: app-build
         run: |
           echo "Downloading: ${{ inputs.tsx_url }}"
-          HTTP_CODE=$(curl -sL -w "%{http_code}" -o src/App.tsx "${{ inputs.tsx_url }}")
+          HTTP_CODE=$(curl -sL -w "%{http_code}" -o generated-code.txt "${{ inputs.tsx_url }}")
 
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "::error::Download failed with HTTP ${HTTP_CODE}"
             exit 1
           fi
 
-          FILE_SIZE=$(wc -c < src/App.tsx)
+          FILE_SIZE=$(wc -c < generated-code.txt)
           if [ "$FILE_SIZE" -lt 50 ]; then
             echo "::error::Downloaded file too small (${FILE_SIZE} bytes) — likely invalid"
             exit 1
           fi
 
-          echo "Downloaded App.tsx: ${FILE_SIZE} bytes (HTTP ${HTTP_CODE})"
+          echo "Downloaded: ${FILE_SIZE} bytes (HTTP ${HTTP_CODE})"
           echo "First 5 lines:"
-          head -5 src/App.tsx
+          head -5 generated-code.txt
 
-      # ─── 9. Configure app metadata ───
+      # ─── 9. Split multi-file output into actual files ───
+      - name: Split multi-file code into actual files
+        working-directory: app-build
+        run: |
+          INPUT="generated-code.txt"
+
+          # Check if it's multi-file format
+          if grep -q "^---FILE:" "$INPUT" || grep -q "^// ---FILE:" "$INPUT"; then
+            echo "Multi-file format detected, splitting..."
+
+            CURRENT_FILE=""
+            while IFS= read -r line; do
+              # Match ---FILE: /src/xxx--- or // ---FILE: /src/xxx---
+              if echo "$line" | grep -qE '^\s*(//\s*)?---FILE:\s*(.+)---'; then
+                CURRENT_FILE=$(echo "$line" | sed -E 's|^\s*(//\s*)?---FILE:\s*||; s|---\s*$||; s|^\s+||; s|\s+$||')
+                # Make path relative (remove leading /)
+                CURRENT_FILE="${CURRENT_FILE#/}"
+                # Create directory if needed
+                mkdir -p "$(dirname "$CURRENT_FILE")"
+                # Clear/create the file
+                > "$CURRENT_FILE"
+                echo "  Creating: $CURRENT_FILE"
+              elif [ -n "$CURRENT_FILE" ]; then
+                echo "$line" >> "$CURRENT_FILE"
+              fi
+            done < "$INPUT"
+
+            echo ""
+            echo "Files created:"
+            find src -type f -name "*.ts" -o -name "*.tsx" | sort
+          else
+            echo "Single-file format, using as App.tsx directly"
+            cp "$INPUT" src/App.tsx
+          fi
+
+          rm -f generated-code.txt
+
+          echo ""
+          echo "Final src/ contents:"
+          ls -la src/
+
+      # ─── 10. Configure app metadata ───
       - name: Configure app metadata
         working-directory: app-build
         run: |
@@ -106,12 +147,12 @@ jobs:
           echo "PACKAGE_ID=${PACKAGE_ID}" >> $GITHUB_ENV
           echo "Configured: ${PACKAGE_ID} / ${{ inputs.app_name }}"
 
-      # ─── 10. Install npm dependencies ───
+      # ─── 11. Install npm dependencies ───
       - name: Install dependencies
         working-directory: app-build
         run: npm install
 
-      # ─── 11. Build with Vite ───
+      # ─── 12. Build with Vite ───
       - name: Build React app
         working-directory: app-build
         run: |
@@ -120,14 +161,14 @@ jobs:
           echo "Build output:"
           ls -la dist/
 
-      # ─── 12. Sync with Capacitor ───
+      # ─── 13. Sync with Capacitor ───
       - name: Sync Capacitor Android
         working-directory: app-build
         run: |
           npx cap sync android
           echo "Capacitor sync complete"
 
-      # ─── 13. Build Android APK ───
+      # ─── 14. Build Android APK ───
       - name: Build Android debug APK
         working-directory: app-build/android
         run: |
@@ -135,7 +176,7 @@ jobs:
           ./gradlew assembleDebug
           echo "APK build completed"
 
-      # ─── 14. Locate APK file ───
+      # ─── 15. Locate APK file ───
       - name: Locate APK file
         id: find_apk
         working-directory: app-build
@@ -156,7 +197,7 @@ jobs:
           echo "apk_path=${APK_PATH}" >> $GITHUB_OUTPUT
           echo "Found APK: ${APK_PATH} (${APK_SIZE})"
 
-      # ─── 15. Upload APK to Supabase Storage ───
+      # ─── 16. Upload APK to Supabase Storage ───
       - name: Upload APK to Supabase Storage
         id: upload
         working-directory: app-build
@@ -204,7 +245,7 @@ jobs:
           echo "apk_url=${APK_URL}" >> $GITHUB_OUTPUT
           echo "Upload successful: ${APK_URL}"
 
-      # ─── 16. Callback — success ───
+      # ─── 17. Callback — success ───
       - name: Notify Zapply — build succeeded
         if: success()
         continue-on-error: true
@@ -219,7 +260,7 @@ jobs:
               \"status\": \"ready\"
             }"
 
-      # ─── 17. Callback — failure ───
+      # ─── 18. Callback — failure ───
       - name: Notify Zapply — build failed
         if: failure()
         continue-on-error: true
