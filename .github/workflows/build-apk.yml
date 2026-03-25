@@ -92,46 +92,64 @@ jobs:
           echo "First 5 lines:"
           head -5 generated-code.txt
 
-      # ─── 9. Split multi-file output into actual files ───
-      - name: Split multi-file code into actual files
+      # ─── 9. Merge multi-file into single App.tsx ───
+      - name: Merge code into single App.tsx
         working-directory: app-build
         run: |
           INPUT="generated-code.txt"
 
-          # Check if it's multi-file format
+          # Strip ---FILE: markers and merge everything into one App.tsx
+          # Zapply's multi-file format uses global scope (no imports between files)
+          # so merging into one file works perfectly for Vite build
           if grep -q "^---FILE:" "$INPUT" || grep -q "^// ---FILE:" "$INPUT"; then
-            echo "Multi-file format detected, splitting..."
+            echo "Multi-file format detected, merging into single App.tsx..."
 
-            CURRENT_FILE=""
-            while IFS= read -r line; do
-              # Match ---FILE: /src/xxx--- or // ---FILE: /src/xxx---
-              if echo "$line" | grep -qE '^\s*(//\s*)?---FILE:\s*(.+)---'; then
-                CURRENT_FILE=$(echo "$line" | sed -E 's|^\s*(//\s*)?---FILE:\s*||; s|---\s*$||; s|^\s+||; s|\s+$||')
-                # Make path relative (remove leading /)
-                CURRENT_FILE="${CURRENT_FILE#/}"
-                # Create directory if needed
-                mkdir -p "$(dirname "$CURRENT_FILE")"
-                # Clear/create the file
-                > "$CURRENT_FILE"
-                echo "  Creating: $CURRENT_FILE"
-              elif [ -n "$CURRENT_FILE" ]; then
-                echo "$line" >> "$CURRENT_FILE"
-              fi
-            done < "$INPUT"
+            # Remove ---FILE: marker lines, keep all code
+            sed -E '/^\s*(\/\/\s*)?---FILE:.*---\s*$/d' "$INPUT" > src/App.tsx
 
-            echo ""
-            echo "Files created:"
-            find src -type f -name "*.ts" -o -name "*.tsx" | sort
+            LINES=$(wc -l < src/App.tsx)
+            echo "Merged App.tsx: ${LINES} lines"
           else
             echo "Single-file format, using as App.tsx directly"
             cp "$INPUT" src/App.tsx
           fi
 
+          # Inject React imports at top if not present
+          # Zapply's Sandpack format uses `var useState = React.useState` without imports
+          if ! grep -q "^import React" src/App.tsx && ! grep -q "^import { " src/App.tsx; then
+            echo "Injecting React imports..."
+            IMPORTS='import React, { useState, useEffect, useRef, useCallback, useMemo, createContext, useContext } from "react";'
+
+            # Check if lucide icons are used
+            LUCIDE_ICONS=$(grep -oP '(?<=<)\w+(?=\s)' src/App.tsx | sort -u | while read icon; do
+              if echo "$icon" | grep -qE '^(Sun|Moon|Star|Heart|Home|Search|Menu|X|Plus|Minus|Check|ChevronRight|ChevronLeft|ChevronDown|ChevronUp|ArrowLeft|ArrowRight|Settings|User|Bell|Mail|Phone|MapPin|Calendar|Clock|Filter|Edit|Trash|Download|Upload|Share|Copy|Eye|EyeOff|Lock|Unlock|Info|AlertCircle|AlertTriangle|ShoppingCart|ShoppingBag|CreditCard|Bookmark|Tag|Zap|Activity|TrendingUp|Award|Gift|Coffee|Utensils|Dumbbell|Flame|Droplets|Wind|Cloud|Thermometer|Navigation|Target|BarChart|PieChart|LineChart|Database|Server|Globe|Wifi|Battery|Monitor|Smartphone|Camera|Image|Video|Music|Headphones|Speaker|Mic|Play|Pause|SkipForward|SkipBack|Volume2|LogOut|LogIn|UserPlus|Users|Send|MessageCircle|MessageSquare|Hash|AtSign|Paperclip|Link|ExternalLink|Layers|Grid|List|Layout|Sidebar|Columns|Square|Circle|Triangle|Hexagon|Octagon|Shield|Flag|Crosshair|Move|Maximize|Minimize|RotateCw|RefreshCw|Loader|MoreHorizontal|MoreVertical|Sliders|ToggleLeft|ToggleRight|Power|Save|FolderOpen|File|FileText|Clipboard|Archive|Box|Package|Truck|Store|Wallet|DollarSign|Percent|Receipt|Building|Briefcase|GraduationCap|BookOpen|Lightbulb|Wrench|Tool|Cog|Key|Fingerprint|QrCode|Scan|Printer|Terminal)$'; then
+                echo "$icon"
+              fi
+            done | paste -sd, -)
+
+            if [ -n "$LUCIDE_ICONS" ]; then
+              IMPORTS="${IMPORTS}"$'\n'"import { ${LUCIDE_ICONS} } from \"lucide-react\";"
+            fi
+
+            # Prepend imports
+            echo "$IMPORTS" | cat - src/App.tsx > /tmp/app_with_imports.tsx
+            mv /tmp/app_with_imports.tsx src/App.tsx
+            echo "Imports injected"
+          fi
+
+          # Ensure export default exists
+          if ! grep -q "export default" src/App.tsx; then
+            echo "export default App;" >> src/App.tsx
+            echo "Added export default"
+          fi
+
           rm -f generated-code.txt
 
-          echo ""
-          echo "Final src/ contents:"
-          ls -la src/
+          echo "First 10 lines:"
+          head -10 src/App.tsx
+          echo "..."
+          echo "Last 5 lines:"
+          tail -5 src/App.tsx
 
       # ─── 9b. Auto-repair incomplete files ───
       - name: Auto-repair incomplete code files
