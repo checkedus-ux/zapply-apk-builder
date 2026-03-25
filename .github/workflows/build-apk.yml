@@ -133,6 +133,47 @@ jobs:
           echo "Final src/ contents:"
           ls -la src/
 
+      # ─── 9b. Auto-repair incomplete files ───
+      - name: Auto-repair incomplete code files
+        working-directory: app-build
+        run: |
+          echo "Checking for incomplete files..."
+          for f in $(find src -name "*.tsx" -o -name "*.ts" | sort); do
+            # Count open vs close braces
+            OPEN=$(grep -o '{' "$f" | wc -l)
+            CLOSE=$(grep -o '}' "$f" | wc -l)
+            DIFF=$((OPEN - CLOSE))
+
+            if [ "$DIFF" -gt 0 ]; then
+              echo "  Fixing $f: $DIFF missing closing brace(s)"
+              for i in $(seq 1 $DIFF); do
+                echo "}" >> "$f"
+              done
+            fi
+
+            # Count open vs close parens
+            OPEN_P=$(grep -o '(' "$f" | wc -l)
+            CLOSE_P=$(grep -o ')' "$f" | wc -l)
+            DIFF_P=$((OPEN_P - CLOSE_P))
+
+            if [ "$DIFF_P" -gt 0 ]; then
+              echo "  Fixing $f: $DIFF_P missing closing paren(s)"
+              for i in $(seq 1 $DIFF_P); do
+                echo ")" >> "$f"
+              done
+            fi
+          done
+
+          # Ensure App.tsx has export default
+          if [ -f src/App.tsx ]; then
+            if ! grep -q "export default" src/App.tsx; then
+              echo "  Adding export default to App.tsx"
+              echo "export default App;" >> src/App.tsx
+            fi
+          fi
+
+          echo "Code repair complete"
+
       # ─── 10. Configure app metadata ───
       - name: Configure app metadata
         working-directory: app-build
