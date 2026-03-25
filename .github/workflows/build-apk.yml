@@ -137,6 +137,67 @@ jobs:
             echo "Imports injected"
           fi
 
+          # Inject Zapply runtime globals (ZapplyDB, fetchAPI, Toast polyfills)
+          # These are normally injected by Sandpack preview runtime
+          echo "Injecting Zapply runtime globals..."
+          cat > /tmp/zapply_globals.tsx << 'GLOBALS_EOF'
+// ─── Zapply Runtime Globals (for APK builds) ───
+
+// ZapplyDB — localStorage wrapper for data persistence
+const ZapplyDB = {
+  get: function(key: string) {
+    try { const v = localStorage.getItem("zapply_" + key); return v ? JSON.parse(v) : null; } catch { return null; }
+  },
+  set: function(key: string, value: unknown) {
+    try { localStorage.setItem("zapply_" + key, JSON.stringify(value)); } catch {}
+  },
+  remove: function(key: string) {
+    try { localStorage.removeItem("zapply_" + key); } catch {}
+  },
+  list: function() {
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("zapply_")) keys.push(k.replace("zapply_", ""));
+    }
+    return keys;
+  }
+};
+(window as unknown as Record<string, unknown>).ZapplyDB = ZapplyDB;
+
+// fetchAPI — fetch helper (direct fetch, no proxy needed in APK)
+const fetchAPI = function(url: string, options?: RequestInit) {
+  const opts = Object.assign({}, options || {});
+  return fetch(url, opts)
+    .then(function(r: Response) { if (r.ok) return r.json(); throw new Error(String(r.status)); })
+    .catch(function() { return null; });
+};
+(window as unknown as Record<string, unknown>).fetchAPI = fetchAPI;
+
+// Toast polyfill — simple no-op if not defined by app code
+if (typeof (window as unknown as Record<string, unknown>).useToast === 'undefined') {
+  (window as unknown as Record<string, unknown>).useToast = function() {
+    return { toast: function(msg: unknown) { console.log('Toast:', msg); }, dismiss: function() {} };
+  };
+}
+
+// ─── End Zapply Runtime ───
+
+GLOBALS_EOF
+
+          # Insert globals after the React import line
+          if grep -qn "^import React" src/App.tsx; then
+            IMPORT_LINE=$(grep -n "^import" src/App.tsx | tail -1 | cut -d: -f1)
+            head -n "$IMPORT_LINE" src/App.tsx > /tmp/app_final.tsx
+            cat /tmp/zapply_globals.tsx >> /tmp/app_final.tsx
+            tail -n +$((IMPORT_LINE + 1)) src/App.tsx >> /tmp/app_final.tsx
+            mv /tmp/app_final.tsx src/App.tsx
+          else
+            cat /tmp/zapply_globals.tsx src/App.tsx > /tmp/app_final.tsx
+            mv /tmp/app_final.tsx src/App.tsx
+          fi
+          echo "Zapply globals injected"
+
           # Ensure export default exists
           if ! grep -q "export default" src/App.tsx; then
             echo "export default App;" >> src/App.tsx
@@ -145,8 +206,8 @@ jobs:
 
           rm -f generated-code.txt
 
-          echo "First 10 lines:"
-          head -10 src/App.tsx
+          echo "First 15 lines:"
+          head -15 src/App.tsx
           echo "..."
           echo "Last 5 lines:"
           tail -5 src/App.tsx
